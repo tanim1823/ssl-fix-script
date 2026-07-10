@@ -29,31 +29,46 @@ if [ "$MODE" = "fresh" ]; then
 
   # --- Auto-detect validation method ---
   WEBROOT=""
+  VHOST_CONF="/usr/local/lsws/conf/vhosts/${DOMAIN}/vhost.conf"
+
+  # 0) CyberPanel/OpenLiteSpeed often defines a dedicated context block that
+  #    redirects /.well-known/acme-challenge/ to a shared folder (e.g. Example/html).
+  #    This takes priority since it overrides the normal docRoot for that path.
+  if [ -f "$VHOST_CONF" ]; then
+    ACME_LOC="$(grep -A3 'context[[:space:]]*/\.well-known/acme-challenge' "$VHOST_CONF" \
+                | grep -oP '(?<=location[[:space:]])\s*\S+' | head -n1 | tr -d '[:space:]')"
+    if [ -n "$ACME_LOC" ]; then
+      DETECTED="${ACME_LOC%/.well-known/acme-challenge}"
+      DETECTED="${DETECTED%/}"
+      if [ -d "$DETECTED" ]; then
+        WEBROOT="$DETECTED"
+        echo "[+] Found dedicated ACME challenge webroot from vhost context rule: $WEBROOT"
+      fi
+    fi
+  fi
 
   # 1) Try to read webroot from an existing acme.sh config (if present)
-  for CONF in "$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.conf" "$ACME_HOME/${DOMAIN}/${DOMAIN}.conf"; do
-    if [ -f "$CONF" ]; then
-      DETECTED="$(grep -oP "(?<=Le_Webroot=')[^']+" "$CONF" 2>/dev/null | head -n1)"
-      if [ -n "$DETECTED" ] && [ -d "$DETECTED" ]; then
-        WEBROOT="$DETECTED"
-        echo "[+] Found webroot from acme.sh config: $WEBROOT"
-        break
+  if [ -z "$WEBROOT" ]; then
+    for CONF in "$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.conf" "$ACME_HOME/${DOMAIN}/${DOMAIN}.conf"; do
+      if [ -f "$CONF" ]; then
+        DETECTED="$(grep -oP "(?<=Le_Webroot=')[^']+" "$CONF" 2>/dev/null | head -n1)"
+        if [ -n "$DETECTED" ] && [ -d "$DETECTED" ]; then
+          WEBROOT="$DETECTED"
+          echo "[+] Found webroot from acme.sh config: $WEBROOT"
+          break
+        fi
       fi
-    fi
-  done
+    done
+  fi
 
-  # 2) Try to detect from OpenLiteSpeed vhost config (docRoot line for this domain)
-  if [ -z "$WEBROOT" ] && [ -d /usr/local/lsws/conf/vhosts ]; then
-    VHCONF="$(grep -rl "docRoot" /usr/local/lsws/conf/vhosts/*/vhconf.conf 2>/dev/null | grep -i "$DOMAIN" | head -n1)"
-    if [ -z "$VHCONF" ] && [ -f "/usr/local/lsws/conf/vhosts/${DOMAIN}/vhconf.conf" ]; then
-      VHCONF="/usr/local/lsws/conf/vhosts/${DOMAIN}/vhconf.conf"
-    fi
-    if [ -n "$VHCONF" ] && [ -f "$VHCONF" ]; then
-      DETECTED="$(grep -oP '(?<=docRoot\s{1,10}).*' "$VHCONF" | head -n1 | tr -d '[:space:]' | sed "s|\$VH_ROOT|/usr/local/lsws/${DOMAIN}|")"
-      if [ -n "$DETECTED" ] && [ -d "$DETECTED" ]; then
-        WEBROOT="$DETECTED"
-        echo "[+] Found webroot from LiteSpeed vhost config: $WEBROOT"
-      fi
+  # 2) Try to detect from the vhost's normal docRoot (only valid if no override context exists)
+  if [ -z "$WEBROOT" ] && [ -f "$VHOST_CONF" ]; then
+    DR="$(grep -oP '(?<=docRoot[[:space:]]).*' "$VHOST_CONF" | head -n1 | tr -d '[:space:]')"
+    VH_ROOT="/home/${DOMAIN}"
+    DETECTED="${DR//\$VH_ROOT/$VH_ROOT}"
+    if [ -n "$DETECTED" ] && [ -d "$DETECTED" ]; then
+      WEBROOT="$DETECTED"
+      echo "[+] Found webroot from vhost docRoot: $WEBROOT"
     fi
   fi
 
