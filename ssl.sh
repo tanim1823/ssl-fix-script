@@ -25,16 +25,64 @@ fi
 LIVE_DIR="/etc/letsencrypt/live/$DOMAIN"
 
 if [ "$MODE" = "fresh" ]; then
-  echo "[+] FRESH mode: removing old cert for $DOMAIN from acme.sh ..."
-  "$ACME_HOME/acme.sh" --remove -d "$DOMAIN" --ecc 2>/dev/null || true
-  "$ACME_HOME/acme.sh" --remove -d "$DOMAIN" 2>/dev/null || true
+  echo "[+] FRESH mode: issuing a brand new key+cert for $DOMAIN (no delete needed) ..."
 
-  # delete leftover cert directories so acme.sh treats it as brand new
-  rm -rf "$ACME_HOME/${DOMAIN}_ecc" "$ACME_HOME/${DOMAIN}"
+  # --- Auto-detect validation method ---
+  WEBROOT=""
+
+  # 1) Try to read webroot from an existing acme.sh config (if present)
+  for CONF in "$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.conf" "$ACME_HOME/${DOMAIN}/${DOMAIN}.conf"; do
+    if [ -f "$CONF" ]; then
+      DETECTED="$(grep -oP "(?<=Le_Webroot=')[^']+" "$CONF" 2>/dev/null | head -n1)"
+      if [ -n "$DETECTED" ] && [ -d "$DETECTED" ]; then
+        WEBROOT="$DETECTED"
+        echo "[+] Found webroot from acme.sh config: $WEBROOT"
+        break
+      fi
+    fi
+  done
+
+  # 2) Try to detect from OpenLiteSpeed vhost config (docRoot line for this domain)
+  if [ -z "$WEBROOT" ] && [ -d /usr/local/lsws/conf/vhosts ]; then
+    VHCONF="$(grep -rl "docRoot" /usr/local/lsws/conf/vhosts/*/vhconf.conf 2>/dev/null | grep -i "$DOMAIN" | head -n1)"
+    if [ -z "$VHCONF" ] && [ -f "/usr/local/lsws/conf/vhosts/${DOMAIN}/vhconf.conf" ]; then
+      VHCONF="/usr/local/lsws/conf/vhosts/${DOMAIN}/vhconf.conf"
+    fi
+    if [ -n "$VHCONF" ] && [ -f "$VHCONF" ]; then
+      DETECTED="$(grep -oP '(?<=docRoot\s{1,10}).*' "$VHCONF" | head -n1 | tr -d '[:space:]' | sed "s|\$VH_ROOT|/usr/local/lsws/${DOMAIN}|")"
+      if [ -n "$DETECTED" ] && [ -d "$DETECTED" ]; then
+        WEBROOT="$DETECTED"
+        echo "[+] Found webroot from LiteSpeed vhost config: $WEBROOT"
+      fi
+    fi
+  fi
+
+  # 3) Try common directory patterns
+  if [ -z "$WEBROOT" ]; then
+    for CANDIDATE in "/home/${DOMAIN}/public_html" "/var/www/${DOMAIN}" "/var/www/html/${DOMAIN}" "/usr/local/lsws/${DOMAIN}/html"; do
+      if [ -d "$CANDIDATE" ]; then
+        WEBROOT="$CANDIDATE"
+        echo "[+] Found webroot by common path guess: $WEBROOT"
+        break
+      fi
+    done
+  fi
 
   echo "[+] Issuing a brand new certificate for $DOMAIN ..."
-  "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" --force
-  # ^ adjust validation method here, e.g. add: --webroot /path  OR  --standalone
+  if [ -n "$WEBROOT" ]; then
+    echo "[+] Using webroot validation: $WEBROOT"
+    "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" --webroot "$WEBROOT" --force
+  else
+    echo "[!] Could not auto-detect webroot. Falling back to standalone mode (needs port 80 free)."
+    systemctl stop lsws 2>/dev/null || true
+    "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" --standalone --force
+    ISSUE_RC=$?
+    systemctl start lsws 2>/dev/null || true
+    if [ "$ISSUE_RC" -ne 0 ]; then
+      echo "[-] Standalone issue also failed. Please re-run and choose the correct method manually."
+      exit 1
+    fi
+  fi
   need_renew=0   # already issued, skip the renew block below
 else
   need_renew=1
